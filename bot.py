@@ -15,6 +15,7 @@ from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
+    CommandHandler,
     filters,
 )
 
@@ -37,7 +38,10 @@ if not RENDER_EXTERNAL_URL:
     raise ValueError("RENDER_EXTERNAL_URL is missing")
 
 TZ = ZoneInfo(TIMEZONE)
-GROUPS = set()
+
+# group တစ်ခုချင်း schedule သိမ်းထားမယ့် memory
+# restart / redeploy ဖြစ်ရင် ပြန်ပျောက်မယ်
+GROUP_SETTINGS = {}
 
 OPEN_TEXT = (
     "🌅 မင်္ဂလာနံနက်ခင်းပါရှင်\n"
@@ -83,32 +87,45 @@ def get_close_permissions() -> ChatPermissions:
 
 
 async def open_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await context.bot.set_chat_permissions(chat_id=chat_id, permissions=get_open_permissions())
+    await context.bot.set_chat_permissions(
+        chat_id=chat_id,
+        permissions=get_open_permissions(),
+    )
     await context.bot.send_message(chat_id=chat_id, text=OPEN_TEXT)
 
 
 async def close_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await context.bot.set_chat_permissions(chat_id=chat_id, permissions=get_close_permissions())
+    await context.bot.set_chat_permissions(
+        chat_id=chat_id,
+        permissions=get_close_permissions(),
+    )
     await context.bot.send_message(chat_id=chat_id, text=CLOSE_TEXT)
 
 
 async def auto_open(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for chat_id in list(GROUPS):
-        try:
-            await open_group(chat_id, context)
-        except Exception as e:
-            logger.error("Auto open failed for %s: %s", chat_id, e)
+    chat_id = context.job.chat_id
+    if not chat_id:
+        return
+    try:
+        await open_group(chat_id, context)
+    except Exception as e:
+        logger.error("Auto open failed for %s: %s", chat_id, e)
 
 
 async def auto_close(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for chat_id in list(GROUPS):
-        try:
-            await close_group(chat_id, context)
-        except Exception as e:
-            logger.error("Auto close failed for %s: %s", chat_id, e)
+    chat_id = context.job.chat_id
+    if not chat_id:
+        return
+    try:
+        await close_group(chat_id, context)
+    except Exception as e:
+        logger.error("Auto close failed for %s: %s", chat_id, e)
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not update.effective_chat or not update.effective_user:
+        return False
+
     member = await context.bot.get_chat_member(
         update.effective_chat.id,
         update.effective_user.id,
@@ -116,8 +133,117 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return member.status in ("administrator", "creator")
 
 
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def remove_group_jobs(chat_id: int) -> None:
+    for job in application.job_queue.get_jobs_by_name(f"open_{chat_id}"):
+        job.schedule_removal()
+
+    for job in application.job_queue.get_jobs_by_name(f"close_{chat_id}"):
+        job.schedule_removal()
+
+
+def schedule_group(chat_id: int, open_hour: int, close_hour: int) -> None:
+    remove_group_jobs(chat_id)
+
+    application.job_queue.run_daily(
+        auto_open,
+        time=time(hour=open_hour, minute=0, tzinfo=TZ),
+        chat_id=chat_id,
+        name=f"open_{chat_id}",
+    )
+
+    application.job_queue.run_daily(
+        auto_close,
+        time=time(hour=close_hour, minute=0, tzinfo=TZ),
+        chat_id=chat_id,
+        name=f"close_{chat_id}",
+    )
+
+    GROUP_SETTINGS[chat_id] = {
+        "open_hour": open_hour,
+        "close_hour": close_hour,
+    }
+
+
+def ensure_group_registered(chat_id: int) -> None:
+    if chat_id not in GROUP_SETTINGS:
+        schedule_group(chat_id, 6, 20)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
+        return
+
+    await update.message.reply_text(
+        "🤖 Bot အသုံးပြုပုံ\n\n"
+        "O = Group ဖွင့်\n"
+        "C = Group ပိတ်\n\n"
+        "/settime 6 20\n"
+        "အဓိပ္ပါယ် = မနက် 6 နာရီဖွင့်၊ ည 8 နာရီပိတ်\n\n"
+        "/showtime = လက်ရှိ auto time ကြည့်\n"
+        "/start = အသုံးပြုပုံပြန်ကြည့်\n\n"
+        "မှတ်ချက်:\n"
+        "- Group admin ပဲ သုံးလို့ရပါတယ်\n"
+        "- Default time က 6 AM to 8 PM ပါ"
+    )
+
+
+async def showtime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("ဒီ command ကို group ထဲမှာပဲ သုံးပါ။")
+        return
+
+    chat_id = update.effective_chat.id
+    ensure_group_registered(chat_id)
+
+    cfg = GROUP_SETTINGS[chat_id]
+    await update.message.reply_text(
+        f"⏰ Current Auto Time\n"
+        f"Open: {cfg['open_hour']:02d}:00\n"
+        f"Close: {cfg['close_hour']:02d}:00"
+    )
+
+
+async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("ဒီ command ကို group ထဲမှာပဲ သုံးပါ။")
+        return
+
+    if not await is_admin(update, context):
+        await update.message.reply_text("ဒီ command ကို group admin ပဲ သုံးလို့ရပါတယ်။")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text("ဥပမာ: /settime 6 20")
+        return
+
+    try:
+        open_hour = int(context.args[0])
+        close_hour = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Hour ကို number နဲ့ရေးပါ။ ဥပမာ: /settime 6 20")
+        return
+
+    if not (0 <= open_hour <= 23 and 0 <= close_hour <= 23):
+        await update.message.reply_text("Hour က 0 နဲ့ 23 ကြား ဖြစ်ရမယ်။")
+        return
+
+    chat_id = update.effective_chat.id
+    schedule_group(chat_id, open_hour, close_hour)
+
+    await update.message.reply_text(
+        f"✅ Auto time ပြောင်းပြီးပါပြီ\n"
+        f"From {open_hour:02d}:00 To {close_hour:02d}:00"
+    )
+
+
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
         return
 
     chat = update.effective_chat
@@ -126,7 +252,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat.type == "private":
         return
 
-    GROUPS.add(chat.id)
+    ensure_group_registered(chat.id)
+
+    if text not in ("O", "C"):
+        return
 
     if not await is_admin(update, context):
         return
@@ -156,9 +285,6 @@ async def startup():
     webhook_url = f"{RENDER_EXTERNAL_URL}/telegram/{WEBHOOK_SECRET}"
     await application.bot.set_webhook(webhook_url)
 
-    application.job_queue.run_daily(auto_open, time=time(hour=6, minute=0, tzinfo=TZ))
-    application.job_queue.run_daily(auto_close, time=time(hour=20, minute=0, tzinfo=TZ))
-
     logger.info("Webhook set: %s", webhook_url)
 
 
@@ -169,6 +295,10 @@ async def shutdown():
 
 
 application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("settime", settime))
+application.add_handler(CommandHandler("showtime", showtime))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
 app = Starlette(
