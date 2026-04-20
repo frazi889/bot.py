@@ -1,19 +1,5 @@
+import os
 import logging
-import os
-from datetime import time
-from zoneinfo import ZoneInfo
-
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.routing import Route
-import uvicorn
-
-from telegram import Update, ChatPermissions
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-import os
 from datetime import time
 from zoneinfo import ZoneInfo
 
