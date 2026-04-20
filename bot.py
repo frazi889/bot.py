@@ -1,17 +1,12 @@
 import os
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import time
 from zoneinfo import ZoneInfo
 
-import uvicorn
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.routing import Route
-
 from telegram import Update, ChatPermissions
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
@@ -26,20 +21,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "telegram-webhook")
-PORT = int(os.getenv("PORT", "10000"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Yangon")
+PORT = int(os.getenv("PORT", "10000"))
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing")
 
-if not RENDER_EXTERNAL_URL:
-    raise ValueError("RENDER_EXTERNAL_URL is missing")
-
 TZ = ZoneInfo(TIMEZONE)
 
-# memory only; redeploy/restart ဖြစ်ရင် ပြန်ပျောက်နိုင်တယ်
+# memory only; restart/redeploy ဖြစ်ရင် ပြန်ပျောက်နိုင်တယ်
 GROUP_SETTINGS = {}
 
 OPEN_TEXT = (
@@ -90,10 +80,7 @@ async def open_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=chat_id,
         permissions=get_open_permissions(),
     )
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=OPEN_TEXT,
-    )
+    await context.bot.send_message(chat_id=chat_id, text=OPEN_TEXT)
 
 
 async def close_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,17 +88,13 @@ async def close_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=chat_id,
         permissions=get_close_permissions(),
     )
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=CLOSE_TEXT,
-    )
+    await context.bot.send_message(chat_id=chat_id, text=CLOSE_TEXT)
 
 
 async def auto_open(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.chat_id
     if not chat_id:
         return
-
     try:
         await open_group(chat_id, context)
         logger.info("Auto opened group: %s", chat_id)
@@ -123,7 +106,6 @@ async def auto_close(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.chat_id
     if not chat_id:
         return
-
     try:
         await close_group(chat_id, context)
         logger.info("Auto closed group: %s", chat_id)
@@ -142,7 +124,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return member.status in ("administrator", "creator")
 
 
-def remove_group_jobs(chat_id: int) -> None:
+def remove_group_jobs(application, chat_id: int) -> None:
     for job in application.job_queue.get_jobs_by_name(f"open_{chat_id}"):
         job.schedule_removal()
 
@@ -150,8 +132,8 @@ def remove_group_jobs(chat_id: int) -> None:
         job.schedule_removal()
 
 
-def schedule_group(chat_id: int, open_hour: int, close_hour: int) -> None:
-    remove_group_jobs(chat_id)
+def schedule_group(application, chat_id: int, open_hour: int, close_hour: int) -> None:
+    remove_group_jobs(application, chat_id)
 
     application.job_queue.run_daily(
         auto_open,
@@ -174,29 +156,27 @@ def schedule_group(chat_id: int, open_hour: int, close_hour: int) -> None:
 
     logger.info(
         "Scheduled group %s: open=%02d:00 close=%02d:00",
-        chat_id,
-        open_hour,
-        close_hour,
+        chat_id, open_hour, close_hour
     )
 
 
-def ensure_group_registered(chat_id: int) -> None:
+def ensure_group_registered(application, chat_id: int) -> None:
     if chat_id not in GROUP_SETTINGS:
-        schedule_group(chat_id, 6, 20)
+        schedule_group(application, chat_id, 6, 20)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(
-        "START command received: chat_id=%s text=%s",
-        update.effective_chat.id if update.effective_chat else None,
-        update.message.text if update.message else None,
-    )
-
     if not update.message or not update.effective_chat:
         return
 
+    logger.info(
+        "START command received: chat_id=%s text=%s",
+        update.effective_chat.id,
+        update.message.text,
+    )
+
     if update.effective_chat.type != "private":
-        ensure_group_registered(update.effective_chat.id)
+        ensure_group_registered(context.application, update.effective_chat.id)
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -227,7 +207,7 @@ async def showtime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = update.effective_chat.id
-    ensure_group_registered(chat_id)
+    ensure_group_registered(context.application, chat_id)
 
     cfg = GROUP_SETTINGS[chat_id]
     await context.bot.send_message(
@@ -283,7 +263,7 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = update.effective_chat.id
-    schedule_group(chat_id, open_hour, close_hour)
+    schedule_group(context.application, chat_id, open_hour, close_hour)
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -294,7 +274,7 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
 
@@ -304,7 +284,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat.type == "private":
         return
 
-    ensure_group_registered(chat.id)
+    ensure_group_registered(context.application, chat.id)
 
     if text not in ("O", "C"):
         return
@@ -314,56 +294,44 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if text == "O":
         await open_group(chat.id, context)
-
     elif text == "C":
         await close_group(chat.id, context)
 
 
-async def health(request: Request):
-    return PlainTextResponse("ok")
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
 
 
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    logger.info("Webhook update received: %s", data.get("update_id"))
-
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return JSONResponse({"ok": True})
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logger.info("Health server running on port %s", PORT)
+    server.serve_forever()
 
 
-async def startup():
-    await application.initialize()
-    await application.start()
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    webhook_url = f"{RENDER_EXTERNAL_URL}/telegram/{WEBHOOK_SECRET}"
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    await application.bot.set_webhook(webhook_url)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("showtime", showtime))
+    app.add_handler(CommandHandler("settime", settime))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Webhook set: %s", webhook_url)
+    threading.Thread(target=run_health_server, daemon=True).start()
 
+    logger.info("Bot polling started")
+    app.run_polling(drop_pending_updates=True)
 
-async def shutdown():
-    await application.bot.delete_webhook()
-    await application.stop()
-    await application.shutdown()
-
-
-application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("showtime", showtime))
-application.add_handler(CommandHandler("settime", settime))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-app = Starlette(
-    routes=[
-        Route("/", health, methods=["GET"]),
-        Route(f"/telegram/{WEBHOOK_SECRET}", telegram_webhook, methods=["POST"]),
-    ],
-    on_startup=[startup],
-    on_shutdown=[shutdown],
-)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    main()
