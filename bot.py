@@ -39,8 +39,7 @@ if not RENDER_EXTERNAL_URL:
 
 TZ = ZoneInfo(TIMEZONE)
 
-# group တစ်ခုချင်း schedule သိမ်းထားမယ့် memory
-# restart / redeploy ဖြစ်ရင် ပြန်ပျောက်မယ်
+# memory only; redeploy/restart ဖြစ်ရင် ပြန်ပျောက်နိုင်တယ်
 GROUP_SETTINGS = {}
 
 OPEN_TEXT = (
@@ -91,7 +90,10 @@ async def open_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=chat_id,
         permissions=get_open_permissions(),
     )
-    await context.bot.send_message(chat_id=chat_id, text=OPEN_TEXT)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=OPEN_TEXT,
+    )
 
 
 async def close_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -99,15 +101,20 @@ async def close_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=chat_id,
         permissions=get_close_permissions(),
     )
-    await context.bot.send_message(chat_id=chat_id, text=CLOSE_TEXT)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=CLOSE_TEXT,
+    )
 
 
 async def auto_open(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.chat_id
     if not chat_id:
         return
+
     try:
         await open_group(chat_id, context)
+        logger.info("Auto opened group: %s", chat_id)
     except Exception as e:
         logger.error("Auto open failed for %s: %s", chat_id, e)
 
@@ -116,8 +123,10 @@ async def auto_close(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.job.chat_id
     if not chat_id:
         return
+
     try:
         await close_group(chat_id, context)
+        logger.info("Auto closed group: %s", chat_id)
     except Exception as e:
         logger.error("Auto close failed for %s: %s", chat_id, e)
 
@@ -163,6 +172,13 @@ def schedule_group(chat_id: int, open_hour: int, close_hour: int) -> None:
         "close_hour": close_hour,
     }
 
+    logger.info(
+        "Scheduled group %s: open=%02d:00 close=%02d:00",
+        chat_id,
+        open_hour,
+        close_hour,
+    )
+
 
 def ensure_group_registered(chat_id: int) -> None:
     if chat_id not in GROUP_SETTINGS:
@@ -170,8 +186,17 @@ def ensure_group_registered(chat_id: int) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info(
+        "START command received: chat_id=%s text=%s",
+        update.effective_chat.id if update.effective_chat else None,
+        update.message.text if update.message else None,
+    )
+
     if not update.message or not update.effective_chat:
         return
+
+    if update.effective_chat.type != "private":
+        ensure_group_registered(update.effective_chat.id)
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -186,7 +211,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "မှတ်ချက်:\n"
             "- Group admin ပဲ သုံးလို့ရပါတယ်\n"
             "- Default time က 6 AM to 8 PM ပါ"
-        )
+        ),
     )
 
 
@@ -195,17 +220,23 @@ async def showtime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if update.effective_chat.type == "private":
-        await update.message.reply_text("ဒီ command ကို group ထဲမှာပဲ သုံးပါ။")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="ဒီ command ကို group ထဲမှာပဲ သုံးပါ။",
+        )
         return
 
     chat_id = update.effective_chat.id
     ensure_group_registered(chat_id)
 
     cfg = GROUP_SETTINGS[chat_id]
-    await update.message.reply_text(
-        f"⏰ Current Auto Time\n"
-        f"Open: {cfg['open_hour']:02d}:00\n"
-        f"Close: {cfg['close_hour']:02d}:00"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "⏰ Current Auto Time\n"
+            f"Open: {cfg['open_hour']:02d}:00\n"
+            f"Close: {cfg['close_hour']:02d}:00"
+        ),
     )
 
 
@@ -214,34 +245,52 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if update.effective_chat.type == "private":
-        await update.message.reply_text("ဒီ command ကို group ထဲမှာပဲ သုံးပါ။")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="ဒီ command ကို group ထဲမှာပဲ သုံးပါ။",
+        )
         return
 
     if not await is_admin(update, context):
-        await update.message.reply_text("ဒီ command ကို group admin ပဲ သုံးလို့ရပါတယ်။")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="ဒီ command ကို group admin ပဲ သုံးလို့ရပါတယ်။",
+        )
         return
 
     if len(context.args) != 2:
-        await update.message.reply_text("ဥပမာ: /settime 6 20")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="ဥပမာ: /settime 6 20",
+        )
         return
 
     try:
         open_hour = int(context.args[0])
         close_hour = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("Hour ကို number နဲ့ရေးပါ။ ဥပမာ: /settime 6 20")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Hour ကို number နဲ့ရေးပါ။ ဥပမာ: /settime 6 20",
+        )
         return
 
     if not (0 <= open_hour <= 23 and 0 <= close_hour <= 23):
-        await update.message.reply_text("Hour က 0 နဲ့ 23 ကြား ဖြစ်ရမယ်။")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Hour က 0 နဲ့ 23 ကြား ဖြစ်ရမယ်။",
+        )
         return
 
     chat_id = update.effective_chat.id
     schedule_group(chat_id, open_hour, close_hour)
 
-    await update.message.reply_text(
-        f"✅ Auto time ပြောင်းပြီးပါပြီ\n"
-        f"From {open_hour:02d}:00 To {close_hour:02d}:00"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "✅ Auto time ပြောင်းပြီးပါပြီ\n"
+            f"From {open_hour:02d}:00 To {close_hour:02d}:00"
+        ),
     )
 
 
@@ -276,6 +325,8 @@ async def health(request: Request):
 
 async def telegram_webhook(request: Request):
     data = await request.json()
+    logger.info("Webhook update received: %s", data.get("update_id"))
+
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return JSONResponse({"ok": True})
@@ -286,6 +337,7 @@ async def startup():
     await application.start()
 
     webhook_url = f"{RENDER_EXTERNAL_URL}/telegram/{WEBHOOK_SECRET}"
+    await application.bot.delete_webhook(drop_pending_updates=True)
     await application.bot.set_webhook(webhook_url)
 
     logger.info("Webhook set: %s", webhook_url)
@@ -300,8 +352,8 @@ async def shutdown():
 application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("settime", settime))
 application.add_handler(CommandHandler("showtime", showtime))
+application.add_handler(CommandHandler("settime", settime))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
 app = Starlette(
