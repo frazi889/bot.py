@@ -1,10 +1,16 @@
 services:
-  - type: worker
-    name: telegram-open-close-bot
+  - type: web
+    name: telegram-webhook-bot
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN
-        sync: false 
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Yangon
