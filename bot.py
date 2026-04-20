@@ -170,20 +170,23 @@ def ensure_group_registered(chat_id: int) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
+    if not update.message or not update.effective_chat:
         return
 
-    await update.message.reply_text(
-        "🤖 Bot အသုံးပြုပုံ\n\n"
-        "O = Group ဖွင့်\n"
-        "C = Group ပိတ်\n\n"
-        "/settime 6 20\n"
-        "အဓိပ္ပါယ် = မနက် 6 နာရီဖွင့်၊ ည 8 နာရီပိတ်\n\n"
-        "/showtime = လက်ရှိ auto time ကြည့်\n"
-        "/start = အသုံးပြုပုံပြန်ကြည့်\n\n"
-        "မှတ်ချက်:\n"
-        "- Group admin ပဲ သုံးလို့ရပါတယ်\n"
-        "- Default time က 6 AM to 8 PM ပါ"
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "🤖 Bot အသုံးပြုပုံ\n\n"
+            "O = Group ဖွင့်\n"
+            "C = Group ပိတ်\n\n"
+            "/settime 6 20\n"
+            "အဓိပ္ပါယ် = မနက် 6 နာရီဖွင့် ည 8 နာရီပိတ်\n\n"
+            "/showtime = လက်ရှိ auto time ကြည့်\n"
+            "/start = အသုံးပြုပုံပြန်ကြည့်\n\n"
+            "မှတ်ချက်:\n"
+            "- Group admin ပဲ သုံးလို့ရပါတယ်\n"
+            "- Default time က 6 AM to 8 PM ပါ"
+        )
     )
 
 
