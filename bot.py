@@ -12,7 +12,7 @@ import uvicorn
 from telegram import Update, ChatPermissions
 from telegram.ext import (
     Application,
-    ApplicationBuilder,import logging
+    ApplicationBuilder,
 import os
 from datetime import time
 from zoneinfo import ZoneInfo
